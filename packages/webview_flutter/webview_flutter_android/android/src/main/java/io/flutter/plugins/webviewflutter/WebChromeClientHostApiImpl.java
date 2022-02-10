@@ -4,8 +4,11 @@
 
 package io.flutter.plugins.webviewflutter;
 
+import android.content.Context;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Message;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
@@ -67,6 +70,7 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
     @VisibleForTesting
     boolean onCreateWindow(
         final WebView view, Message resultMsg, @Nullable WebView onCreateWindowWebView) {
+      System.out.println("Hello, World!");
       final WebViewClient windowWebViewClient =
           new WebViewClient() {
             @RequiresApi(api = Build.VERSION_CODES.N)
@@ -97,6 +101,27 @@ public class WebChromeClientHostApiImpl implements WebChromeClientHostApi {
       transport.setWebView(onCreateWindowWebView);
       resultMsg.sendToTarget();
 
+      return true;
+    }
+
+    @Override
+    public boolean onShowFileChooser(
+            WebView webView,
+            ValueCallback<Uri[]> filePathCallback,
+            FileChooserParams fileChooserParams) {
+      System.out.println("Hello, World!2");
+      // info as of 2021-03-08:
+      // don't use fileChooserParams.getTitle() as it is (always? on Mi 9T Pro Android 10 at least) null
+      // don't use fileChooserParams.isCaptureEnabled() as it is (always? on Mi 9T Pro Android 10 at least) false, even when the file upload allows images or any file
+      final Context context = webView.getContext();
+      final boolean allowMultipleFiles =
+              Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                      && fileChooserParams.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE;
+      final String[] acceptTypes =
+              Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
+                      ? fileChooserParams.getAcceptTypes()
+                      : new String[0];
+      new FileChooserLauncher(context, allowMultipleFiles, filePathCallback, acceptTypes).start();
       return true;
     }
 
