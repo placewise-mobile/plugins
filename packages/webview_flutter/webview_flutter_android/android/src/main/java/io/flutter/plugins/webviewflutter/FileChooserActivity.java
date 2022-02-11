@@ -1,17 +1,8 @@
-// Copyright 2013 The Flutter Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 package io.flutter.plugins.webviewflutter;
-
-import static io.flutter.plugins.webviewflutter.Constants.ACTION_FILE_CHOOSER_FINISHED;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_ACCEPT_TYPES;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_ALLOW_MULTIPLE_FILES;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_FILE_URIS;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_SHOW_IMAGE_OPTION;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_SHOW_VIDEO_OPTION;
-import static io.flutter.plugins.webviewflutter.Constants.EXTRA_TITLE;
-import static io.flutter.plugins.webviewflutter.Constants.WEBVIEW_STORAGE_DIRECTORY;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -21,8 +12,11 @@ import android.os.Bundle;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Log;
+import android.webkit.MimeTypeMap;
+
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -32,112 +26,102 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 
+import static io.flutter.plugins.webviewflutter.Constants.ACTION_FILE_CHOOSER_FINISHED;
+import static io.flutter.plugins.webviewflutter.Constants.EXTRA_FILE_URI;
+import static io.flutter.plugins.webviewflutter.Constants.EXTRA_SHOW_CAMERA_OPTION;
+import static io.flutter.plugins.webviewflutter.Constants.EXTRA_SHOW_VIDEO_OPTION;
+import static io.flutter.plugins.webviewflutter.Constants.EXTRA_TITLE;
+import static io.flutter.plugins.webviewflutter.Constants.EXTRA_TYPE;
+import static io.flutter.plugins.webviewflutter.Constants.WEBVIEW_STORAGE_DIRECTORY;
+
 public class FileChooserActivity extends Activity {
 
-    private static final String TAG = "FileChooserActivity";
     private static final int FILE_CHOOSER_REQUEST_CODE = 12322;
     private static final SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyyMMdd_HHmmss");
 
-    // List of Uris that point to files where there MIGHT be the output of the capture. At most one of these can be valid
-    private final ArrayList<Uri> potentialCaptureOutputUris = new ArrayList<>();
+    private Uri cameraImageUri;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        showFileChooser(
-                getIntent().getBooleanExtra(EXTRA_SHOW_IMAGE_OPTION, false),
+        showFileChooser(getIntent().getBooleanExtra(EXTRA_SHOW_CAMERA_OPTION, false),
                 getIntent().getBooleanExtra(EXTRA_SHOW_VIDEO_OPTION, false));
     }
 
-    private void showFileChooser(boolean showImageIntent, boolean showVideoIntent) {
-        Intent getContentIntent = createGetContentIntent();
-        Intent captureImageIntent =
-                showImageIntent ? createCaptureIntent(MediaStore.ACTION_IMAGE_CAPTURE, "jpg") : null;
-        Intent captureVideoIntent =
-                showVideoIntent ? createCaptureIntent(MediaStore.ACTION_VIDEO_CAPTURE, "mp4") : null;
-
-        if (getContentIntent == null && captureImageIntent == null && captureVideoIntent == null) {
+    private void showFileChooser(boolean enableCamera, boolean enableVideo) {
+        Intent galleryIntent = createGalleryIntent();
+        Intent takePictureIntent = enableCamera ? createCameraIntent() : null;
+        Intent takeVideoIntent = enableVideo ? createVideoIntent() : null;
+        Log.d("FileChooserActivity", "Enable video is " + enableVideo);
+        if (galleryIntent == null && takePictureIntent == null) {
             // cannot open anything: cancel file chooser
             sendBroadcast(new Intent(ACTION_FILE_CHOOSER_FINISHED));
             finish();
         } else {
-            ArrayList<Intent> intentList = new ArrayList<>();
+            ArrayList<Intent> intentArrayList = new ArrayList<>();
 
-            if (getContentIntent != null) {
-                intentList.add(getContentIntent);
-            }
-
-            if (captureImageIntent != null) {
-                intentList.add(captureImageIntent);
-            }
-            if (captureVideoIntent != null) {
-                intentList.add(captureVideoIntent);
-            }
+            if (takePictureIntent != null) intentArrayList.add(takePictureIntent);
+            if (takeVideoIntent != null) intentArrayList.add(takeVideoIntent);
 
             Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
+            chooserIntent.putExtra(
+                    Intent.EXTRA_INTENT, galleryIntent != null ? galleryIntent : takePictureIntent);
             chooserIntent.putExtra(Intent.EXTRA_TITLE, getIntent().getStringExtra(EXTRA_TITLE));
-
-            chooserIntent.putExtra(Intent.EXTRA_INTENT, intentList.get(0));
-            intentList.remove(0);
-            if (intentList.size() > 0) {
-                chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, intentList.toArray(new Intent[0]));
-            }
+            chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArrayList.toArray(new Intent[0]));
 
             startActivityForResult(chooserIntent, FILE_CHOOSER_REQUEST_CODE);
         }
     }
 
-    private Intent createGetContentIntent() {
+    private Intent createGalleryIntent() {
         Intent filesIntent = new Intent(Intent.ACTION_GET_CONTENT);
-
-        if (getIntent().getBooleanExtra(EXTRA_ALLOW_MULTIPLE_FILES, false)) {
-            filesIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        filesIntent.setType("*/*");
+        ArrayList<String> mimeTypes = new ArrayList<>();
+        for (String type : getIntent().getStringArrayExtra(EXTRA_TYPE)) {
+            mimeTypes.add(getMimeType(type));
         }
-
-        String[] acceptTypes = getIntent().getStringArrayExtra(EXTRA_ACCEPT_TYPES);
-
-        if (acceptTypes.length == 0 || (acceptTypes.length == 1 && acceptTypes[0].length() == 0)) {
-            // empty array or only 1 empty string? -> accept all types
-            filesIntent.setType("*/*");
-        } else if (acceptTypes.length == 1) {
-            filesIntent.setType(acceptTypes[0]);
-        } else {
-            // acceptTypes.length > 1
-            filesIntent.setType("*/*");
-            filesIntent.putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes);
+        for (String type : mimeTypes) {
+            Log.d("Log", "Accepted type is " + type);
         }
+        filesIntent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes.toArray());
 
         return (filesIntent.resolveActivity(getPackageManager()) != null) ? filesIntent : null;
     }
 
-    private Intent createCaptureIntent(String type, String fileFormat) {
-        Intent captureIntent = new Intent(type);
-        if (captureIntent.resolveActivity(getPackageManager()) == null) {
+    private Intent createVideoIntent() {
+        Intent takeVideoIntent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+        takeVideoIntent.putExtra(MediaStore.EXTRA_SIZE_LIMIT, 20971520L);//20*1024*1024
+        if (takeVideoIntent.resolveActivity(getPackageManager()) == null) {
             return null;
         }
+        return takeVideoIntent;
+    }
 
-        // Create the File where the output should go
-        Uri captureOutputUri = getTempUri(fileFormat);
-        potentialCaptureOutputUris.add(captureOutputUri);
+    private Intent createCameraIntent() {
+        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (takePictureIntent.resolveActivity(getPackageManager()) == null) {
+            return null;
+        }
+        // Create the File where the photo should go
+        cameraImageUri = getTempImageUri();
+        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri);
 
-        captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, captureOutputUri);
-
-        return captureIntent;
+        return takePictureIntent;
     }
 
     private File getStorageDirectory() {
         File imageDirectory = new File(getCacheDir(), WEBVIEW_STORAGE_DIRECTORY);
         if (!imageDirectory.exists() && !imageDirectory.mkdir()) {
-            Log.e(TAG, "Unable to create storage directory");
+            Log.e("WEBVIEW", "Unable to create storage directory");
         }
         return imageDirectory;
     }
 
-    private Uri getTempUri(String format) {
-        String fileName = "CAPTURE-" + simpleDateFormat.format(new Date()) + "." + format;
-        File file = new File(getStorageDirectory(), fileName);
+    private Uri getTempImageUri() {
+        String imageFileName = "IMG-" + simpleDateFormat.format(new Date()) + ".jpg";
+        File imageFile = new File(getStorageDirectory(), imageFileName);
         return FileProvider.getUriForFile(
-                this, getApplicationContext().getPackageName() + ".generic.provider", file);
+                this, getApplicationContext().getPackageName() + ".generic.provider", imageFile);
     }
 
     private String getFileNameFromUri(Uri uri) {
@@ -151,70 +135,75 @@ public class FileChooserActivity extends Activity {
     }
 
     private Uri copyToLocalUri(Uri uri) {
-        File destination = new File(getStorageDirectory(), getFileNameFromUri(uri));
+        InputStream in = null;
+        OutputStream out = null;
+        try {
+            File destination = new File(getStorageDirectory(), getFileNameFromUri(uri));
+            in = getContentResolver().openInputStream(uri);
+            out = new FileOutputStream(destination);
 
-        try (InputStream in = getContentResolver().openInputStream(uri);
-             OutputStream out = new FileOutputStream(destination)) {
+            int cnt = 0;
             byte[] buffer = new byte[1024];
             int len;
             while ((len = in.read(buffer)) != -1) {
                 out.write(buffer, 0, len);
+                cnt += len;
             }
+
             return FileProvider.getUriForFile(
                     this, getApplicationContext().getPackageName() + ".generic.provider", destination);
-        } catch (IOException e) {
-            Log.e(TAG, "Unable to copy selected image", e);
-            e.printStackTrace();
-            return null;
+        } catch (Exception e) {
+            Log.e("WEBVIEW", "Unable to copy selected image", e);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
         }
+
+        return null;
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
-            Intent fileChooserFinishedIntent = new Intent(ACTION_FILE_CHOOSER_FINISHED);
+            Intent intent = new Intent(ACTION_FILE_CHOOSER_FINISHED);
             if (resultCode == Activity.RESULT_OK) {
-                if (data != null && (data.getDataString() != null || data.getClipData() != null)) {
-                    if (data.getDataString() != null) {
-                        // single result from file browser OR video from camera
-                        Uri localUri = copyToLocalUri(data.getData());
-                        if (localUri != null) {
-                            fileChooserFinishedIntent.putExtra(
-                                    EXTRA_FILE_URIS, new String[] {localUri.toString()});
-                        }
-                    } else if (data.getClipData() != null) {
-                        // multiple results from file browser
-                        int uriCount = data.getClipData().getItemCount();
-                        String[] uriStrings = new String[uriCount];
-
-                        for (int i = 0; i < uriCount; i++) {
-                            Uri localUri = copyToLocalUri(data.getClipData().getItemAt(i).getUri());
-                            if (localUri != null) {
-                                uriStrings[i] = localUri.toString();
-                            }
-                        }
-                        fileChooserFinishedIntent.putExtra(EXTRA_FILE_URIS, uriStrings);
-                    }
+                if (data != null && data.getDataString() != null) {
+                    // result from file browser
+                    final Uri uri = copyToLocalUri(data.getData());
+                    intent.putExtra(EXTRA_FILE_URI, uri.toString());
                 } else {
-                    // image result from camera (videos from the camera are handled above, but this if-branch could handle them too if this varies from device to device)
-                    for (Uri captureOutputUri : potentialCaptureOutputUris) {
-                        try {
-                            // just opening an input stream (and closing immediately) to test if the Uri points to a valid file
-                            // if it's not a real file, the below catch-clause gets executed and we continue with the next Uri in the loop.
-                            getContentResolver().openInputStream(captureOutputUri).close();
-                            fileChooserFinishedIntent.putExtra(
-                                    EXTRA_FILE_URIS, new String[] {captureOutputUri.toString()});
-                            // leave the loop, as only one of the potentialCaptureOutputUris is valid and we just found it
-                            break;
-                        } catch (IOException ignored) {
-                        }
-                    }
+                    // result from camera
+                    intent.putExtra(EXTRA_FILE_URI, cameraImageUri.toString());
                 }
             }
-            sendBroadcast(fileChooserFinishedIntent);
+            sendBroadcast(intent);
             finish();
         } else {
             super.onActivityResult(requestCode, resultCode, data);
         }
+    }
+
+
+    static String getMimeType(String extension) {
+        String type = null;
+        if (extension != null) {
+            type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.replace(".", "").toLowerCase());
+        }
+        if (type == null) {
+            type = extension;
+        }
+        return type;
     }
 }

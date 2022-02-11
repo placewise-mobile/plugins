@@ -1,4 +1,4 @@
-// Copyright 2013 The Flutter Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,11 +10,10 @@ public class Constants {
     static final String ACTION_FILE_CHOOSER_FINISHED = "action_file_chooser_completed";
 
     static final String EXTRA_TITLE = "extra_title";
-    static final String EXTRA_ACCEPT_TYPES = "extra_types";
+    static final String EXTRA_TYPE = "extra_type";
+    static final String EXTRA_SHOW_CAMERA_OPTION = "extra_show_camera_option";
     static final String EXTRA_SHOW_VIDEO_OPTION = "extra_show_video_option";
-    static final String EXTRA_SHOW_IMAGE_OPTION = "extra_show_image_option";
-    static final String EXTRA_FILE_URIS = "extra_file_uris";
-    static final String EXTRA_ALLOW_MULTIPLE_FILES = "extra_allow_multiple_files";
+    static final String EXTRA_FILE_URI = "extra_file_uri";
 
     static final String WEBVIEW_STORAGE_DIRECTORY = "storage";
 }
