@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
+import 'foundation/foundation.dart';
 import 'web_kit/web_kit.dart';
 
 /// A [Widget] that displays a [WKWebView].
@@ -19,7 +20,7 @@ class WebKitWebViewWidget extends StatefulWidget {
     required this.javascriptChannelRegistry,
     required this.onBuildWidget,
     this.configuration,
-    @visibleForTesting this.webViewProxy = const WebViewProxy(),
+    @visibleForTesting this.webViewProxy = const WebViewWidgetProxy(),
   });
 
   /// The initial parameters used to setup the WebView.
@@ -39,7 +40,7 @@ class WebKitWebViewWidget extends StatefulWidget {
   /// The handler for constructing [WKWebView]s and calling static methods.
   ///
   /// This should only be changed for testing purposes.
-  final WebViewProxy webViewProxy;
+  final WebViewWidgetProxy webViewProxy;
 
   /// A callback to build a widget once [WKWebView] has been initialized.
   final Widget Function(WebKitWebViewPlatformController controller)
@@ -78,15 +79,29 @@ class WebKitWebViewPlatformController extends WebViewPlatformController {
     required this.callbacksHandler,
     required this.javascriptChannelRegistry,
     WKWebViewConfiguration? configuration,
-    @visibleForTesting this.webViewProxy = const WebViewProxy(),
+    @visibleForTesting this.webViewProxy = const WebViewWidgetProxy(),
   }) : super(callbacksHandler) {
     _setCreationParams(
       creationParams,
-      configuration: configuration ?? WKWebViewConfiguration(),
-    ).then((_) => _initializationCompleter.complete());
+      configuration: configuration ??
+          WKWebViewConfiguration(
+            userContentController: WKUserContentController(),
+          ),
+    );
+
+    webView.uiDelegate = uiDelegate;
+    uiDelegate.onCreateWebView = (
+      WKWebViewConfiguration configuration,
+      WKNavigationAction navigationAction,
+    ) {
+      if (!navigationAction.targetFrame.isMainFrame) {
+        webView.loadRequest(navigationAction.request);
+      }
+    };
   }
 
-  final Completer<void> _initializationCompleter = Completer<void>();
+  final Map<String, WKScriptMessageHandler> _scriptMessageHandlers =
+      <String, WKScriptMessageHandler>{};
 
   /// Handles callbacks that are made by navigation.
   final WebViewPlatformCallbacksHandler callbacksHandler;
@@ -97,10 +112,40 @@ class WebKitWebViewPlatformController extends WebViewPlatformController {
   /// Handles constructing a [WKWebView].
   ///
   /// This should only be changed when used for testing.
-  final WebViewProxy webViewProxy;
+  final WebViewWidgetProxy webViewProxy;
 
   /// Represents the WebView maintained by platform code.
   late final WKWebView webView;
+
+  /// Used to integrate custom user interface elements into web view interactions.
+  @visibleForTesting
+  late final WKUIDelegate uiDelegate = webViewProxy.createUIDelgate();
+
+  /// Methods for handling navigation changes and tracking navigation requests.
+  @visibleForTesting
+  late final WKNavigationDelegate navigationDelegate =
+      webViewProxy.createNavigationDelegate()
+        ..didStartProvisionalNavigation = (WKWebView webView, String? url) {
+          callbacksHandler.onPageStarted(url ?? '');
+        }
+        ..didFinishNavigation = (WKWebView webView, String? url) {
+          callbacksHandler.onPageFinished(url ?? '');
+        }
+        ..didFailNavigation = (WKWebView webView, NSError error) {
+          callbacksHandler.onWebResourceError(_toWebResourceError(error));
+        }
+        ..didFailProvisionalNavigation = (WKWebView webView, NSError error) {
+          callbacksHandler.onWebResourceError(_toWebResourceError(error));
+        }
+        ..webViewWebContentProcessDidTerminate = (WKWebView webView) {
+          callbacksHandler.onWebResourceError(WebResourceError(
+            errorCode: WKErrorCode.webContentProcessTerminated,
+            // Value from https://developer.apple.com/documentation/webkit/wkerrordomain?language=objc.
+            domain: 'WKErrorDomain',
+            description: '',
+            errorType: WebResourceErrorType.webContentProcessTerminated,
+          ));
+        };
 
   Future<void> _setCreationParams(
     CreationParams params, {
@@ -113,6 +158,14 @@ class WebKitWebViewPlatformController extends WebViewPlatformController {
     );
 
     webView = webViewProxy.createWebView(configuration);
+
+    await addJavascriptChannels(params.javascriptChannelNames);
+
+    webView.navigationDelegate = navigationDelegate;
+
+    if (params.webSettings != null) {
+      updateSettings(params.webSettings!);
+    }
   }
 
   void _setWebViewConfiguration(
@@ -140,18 +193,151 @@ class WebKitWebViewPlatformController extends WebViewPlatformController {
       if (!requiresUserAction) WKAudiovisualMediaType.none,
     };
   }
+
+  @override
+  Future<void> updateSettings(WebSettings setting) async {
+    if (setting.hasNavigationDelegate != null) {
+      _setHasNavigationDelegate(setting.hasNavigationDelegate!);
+    }
+  }
+
+  @override
+  Future<void> addJavascriptChannels(Set<String> javascriptChannelNames) async {
+    await Future.wait<void>(
+      javascriptChannelNames.where(
+        (String channelName) {
+          return !_scriptMessageHandlers.containsKey(channelName);
+        },
+      ).map<Future<void>>(
+        (String channelName) {
+          final WKScriptMessageHandler handler =
+              webViewProxy.createScriptMessageHandler()
+                ..didReceiveScriptMessage = (
+                  WKUserContentController userContentController,
+                  WKScriptMessage message,
+                ) {
+                  javascriptChannelRegistry.onJavascriptChannelMessage(
+                    message.name,
+                    message.body!.toString(),
+                  );
+                };
+          _scriptMessageHandlers[channelName] = handler;
+
+          final String wrapperSource =
+              'window.$channelName = webkit.messageHandlers.$channelName;';
+          final WKUserScript wrapperScript = WKUserScript(
+            wrapperSource,
+            WKUserScriptInjectionTime.atDocumentStart,
+            isMainFrameOnly: false,
+          );
+          webView.configuration.userContentController
+              .addUserScript(wrapperScript);
+          return webView.configuration.userContentController
+              .addScriptMessageHandler(
+            handler,
+            channelName,
+          );
+        },
+      ),
+    );
+  }
+
+  @override
+  Future<void> removeJavascriptChannels(
+    Set<String> javascriptChannelNames,
+  ) async {
+    if (javascriptChannelNames.isEmpty) {
+      return;
+    }
+
+    // WKWebView does not support removing a single user script, so this removes
+    // all user scripts and all message handlers and re-registers channels that
+    // shouldn't be removed. Note that this workaround could interfere with
+    // exposing support for custom scripts from applications.
+    webView.configuration.userContentController.removeAllUserScripts();
+    webView.configuration.userContentController
+        .removeAllScriptMessageHandlers();
+
+    javascriptChannelNames.forEach(_scriptMessageHandlers.remove);
+    final Set<String> remainingNames = _scriptMessageHandlers.keys.toSet();
+    _scriptMessageHandlers.clear();
+
+    await addJavascriptChannels(remainingNames);
+  }
+
+  void _setHasNavigationDelegate(bool hasNavigationDelegate) {
+    if (hasNavigationDelegate) {
+      navigationDelegate.decidePolicyForNavigationAction =
+          (WKWebView webView, WKNavigationAction action) async {
+        final bool allow = await callbacksHandler.onNavigationRequest(
+          url: action.request.url,
+          isForMainFrame: action.targetFrame.isMainFrame,
+        );
+
+        return allow
+            ? WKNavigationActionPolicy.allow
+            : WKNavigationActionPolicy.cancel;
+      };
+    } else {
+      navigationDelegate.decidePolicyForNavigationAction = null;
+    }
+  }
+
+  static WebResourceError _toWebResourceError(NSError error) {
+    WebResourceErrorType? errorType;
+
+    switch (error.code) {
+      case WKErrorCode.unknown:
+        errorType = WebResourceErrorType.unknown;
+        break;
+      case WKErrorCode.webContentProcessTerminated:
+        errorType = WebResourceErrorType.webContentProcessTerminated;
+        break;
+      case WKErrorCode.webViewInvalidated:
+        errorType = WebResourceErrorType.webViewInvalidated;
+        break;
+      case WKErrorCode.javaScriptExceptionOccurred:
+        errorType = WebResourceErrorType.javaScriptExceptionOccurred;
+        break;
+      case WKErrorCode.javaScriptResultTypeIsUnsupported:
+        errorType = WebResourceErrorType.javaScriptResultTypeIsUnsupported;
+        break;
+    }
+
+    return WebResourceError(
+      errorCode: error.code,
+      domain: error.domain,
+      description: error.localizedDescription,
+      errorType: errorType,
+    );
+  }
 }
 
-/// Handles constructing [WKWebView]s and calling static methods.
+/// Handles constructing objects and calling static methods.
 ///
 /// This should only be used for testing purposes.
 @visibleForTesting
-class WebViewProxy {
-  /// Creates a [WebViewProxy].
-  const WebViewProxy();
+class WebViewWidgetProxy {
+  /// Constructs a [WebViewWidgetProxy].
+  const WebViewWidgetProxy();
 
   /// Constructs a [WKWebView].
   WKWebView createWebView(WKWebViewConfiguration configuration) {
     return WKWebView(configuration);
+  }
+
+  /// Constructs a [WKScriptMessageHandler].
+  WKScriptMessageHandler createScriptMessageHandler() {
+    return WKScriptMessageHandler();
+  }
+
+  /// Constructs a [WKUIDelegate].
+  WKUIDelegate createUIDelgate() {
+    return WKUIDelegate();
+  }
+
+  /// Constructs a [WKNavigationDelegate].
+  WKNavigationDelegate createNavigationDelegate() {
+    return WKNavigationDelegate();
   }
 }
